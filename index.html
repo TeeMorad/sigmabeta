@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>انسان حيوان جماد 🎮</title>
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;700;900&family=Lalezar&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
     :root {
       --navy: #0d1b3e;
@@ -786,7 +785,7 @@
 <div id="homeScreen" class="screen active">
   <div class="container">
     <div style="margin-top: 20px; margin-bottom: 8px; position: relative;">
-      <div style="position: absolute; top: 0; left: 0; background: rgba(245,200,66,0.12); border: 1px solid rgba(245,200,66,0.3); border-radius: 20px; padding: 3px 10px; font-size: 0.75rem; color: var(--gold); font-family: 'Tajawal', sans-serif;">v1.5</div>
+      <div style="position: absolute; top: 0; left: 0; background: rgba(245,200,66,0.12); border: 1px solid rgba(245,200,66,0.3); border-radius: 20px; padding: 3px 10px; font-size: 0.75rem; color: var(--gold); font-family: 'Tajawal', sans-serif;">v1.6</div>
       <div class="emoji-row">🧑 🐘 🏺</div>
       <div class="logo">انسان حيوان جماد</div>
       <div class="logo-sub">لعبة الكلمات الجماعية</div>
@@ -995,23 +994,21 @@ const PLAYER_EMOJIS = ['😎','🤩','😏','🦁','🐯','🦊','🐺','🦝','
 // =============================================
 //  STATE
 // =============================================
-let peer = null;
-let myPeerId = null;
+// Each player gets a stable random ID for this session
+const myId = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2,18));
 let myName = '';
 let isHost = false;
-let hostConnection = null;       // Client → Host
-let clientConnections = {};      // Host → Clients map {peerId: conn}
-let players = {};                // {peerId: {name, score, emoji, connected}}
+let players = {};
 let mySettings = { rounds: 5, timerSec: 90 };
 let usedLetters = [];
 
 let gameState = {
-  phase: 'lobby',  // lobby | playing | results | gameover
+  phase: 'lobby',
   round: 0,
   letter: '',
   endTime: 0,
-  answers: {},       // {peerId: {cat: answer, ...}}
-  submitted: {},     // {peerId: true}
+  answers: {},
+  submitted: {},
   stopped: false,
   stoppedBy: null,
 };
@@ -1019,6 +1016,31 @@ let gameState = {
 let timerInterval = null;
 let myAnswers = {};
 let hasSubmitted = false;
+
+// Trystero networking
+let trysteroRoom = null;
+let trySend = null; // broadcast function
+let peerToPlayerId = {}; // maps trystero internal peerId → our myId
+let myRoomCode = '';
+
+// Load Trystero dynamically (uses BitTorrent trackers — no server needed)
+let trysteroJoinRoom = null;
+(async () => {
+  try {
+    const mod = await import('https://esm.sh/trystero@0.21.0/torrent');
+    trysteroJoinRoom = mod.joinRoom;
+    setPeerStatus('connected', '✅ جاهز للاتصال');
+    document.getElementById('createRoomBtn').disabled = false;
+    document.getElementById('joinRoomBtn').disabled = false;
+    const urlRoom = new URLSearchParams(location.search).get('room');
+    if (urlRoom) {
+      document.getElementById('roomCodeInput').value = urlRoom;
+    }
+  } catch(e) {
+    console.error('Trystero load error:', e);
+    setPeerStatus('error', '⚠️ خطأ في التحميل — حاول تحديث الصفحة');
+  }
+})();
 
 // =============================================
 //  STARS
@@ -1050,74 +1072,8 @@ function showScreen(id) {
 }
 
 // =============================================
-//  PEER.JS SETUP
+//  TRYSTERO NETWORKING
 // =============================================
-function initPeer(customId) {
-  // Use PeerJS default cloud server — most reliable option, no custom host needed
-  const peerConfig = {
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-      ]
-    }
-  };
-
-  try {
-    peer = customId ? new Peer(customId, peerConfig) : new Peer(peerConfig);
-  } catch(e) {
-    setPeerStatus('error', '⚠️ خطأ — حاول تحديث الصفحة');
-    return;
-  }
-
-  // Timeout: if no 'open' after 8 seconds, retry once
-  const connectTimeout = setTimeout(() => {
-    if (!myPeerId) {
-      setPeerStatus('connecting', '🔄 إعادة المحاولة...');
-      try { peer.destroy(); } catch(e) {}
-      peer = null;
-      setTimeout(() => initPeer(customId), 1000);
-    }
-  }, 8000);
-
-  peer.on('open', (id) => {
-    clearTimeout(connectTimeout);
-    myPeerId = id;
-    setPeerStatus('connected', '✅ جاهز للاتصال');
-    document.getElementById('createRoomBtn').disabled = false;
-    document.getElementById('joinRoomBtn').disabled = false;
-    const urlRoom = new URLSearchParams(location.search).get('room');
-    if (urlRoom && !isHost) {
-      document.getElementById('roomCodeInput').value = urlRoom.toUpperCase();
-    }
-  });
-
-  peer.on('error', (err) => {
-    clearTimeout(connectTimeout);
-    console.error('PeerJS error:', err.type, err);
-    if (err.type === 'unavailable-id') {
-      initPeer(); // ID taken, try random one
-    } else if (err.type === 'peer-unavailable') {
-      showJoinError('الغرفة غير موجودة أو منتهية. تأكد من الكود.');
-    } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-      setPeerStatus('connecting', '🔄 إعادة الاتصال...');
-      try { peer.destroy(); } catch(e) {}
-      peer = null;
-      myPeerId = null;
-      setTimeout(() => initPeer(customId), 2000);
-    } else {
-      setPeerStatus('error', '⚠️ خطأ في الاتصال — حاول تحديث الصفحة');
-    }
-  });
-
-  peer.on('connection', (conn) => {
-    if (!isHost) return;
-    handleNewClientConnection(conn);
-  });
-}
-
 function setPeerStatus(state, text) {
   const dot = document.getElementById('peerDot');
   const status = document.getElementById('peerStatus');
@@ -1125,15 +1081,169 @@ function setPeerStatus(state, text) {
   status.textContent = text;
 }
 
-// =============================================
-//  ROOM CODE GENERATION
-// =============================================
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
-let myRoomCode = ''; // separate from PeerJS ID
+function getEmoji(id) {
+  const idx = (id.charCodeAt(0) + id.charCodeAt(1)) % PLAYER_EMOJIS.length;
+  return PLAYER_EMOJIS[idx];
+}
+
+function openTrysteroRoom(roomCode) {
+  if (!trysteroJoinRoom) { toast('لم يكتمل التحميل بعد، انتظر...'); return false; }
+
+  // Leave existing room first
+  if (trysteroRoom) { try { trysteroRoom.leave(); } catch(e){} }
+
+  myRoomCode = roomCode;
+  trysteroRoom = trysteroJoinRoom(
+    { appId: 'insan-hayawan-jamad-v6', rtcConfig: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ]
+      }
+    },
+    roomCode
+  );
+
+  const [send, onReceive] = trysteroRoom.makeAction('msg');
+  trySend = send;
+
+  // All messages go through one handler
+  onReceive((data, fromTrysteroId) => {
+    // Map trystero ID → player ID
+    if (data.from && !peerToPlayerId[fromTrysteroId]) {
+      peerToPlayerId[fromTrysteroId] = data.from;
+    }
+    handleMessage(data);
+  });
+
+  trysteroRoom.onPeerJoin(tid => {
+    // Host welcomes new peer as soon as they appear
+    if (isHost) {
+      setTimeout(() => {
+        broadcastToAll({ type: 'welcome', players, settings: mySettings, gamePhase: gameState.phase });
+      }, 500);
+    }
+  });
+
+  trysteroRoom.onPeerLeave(tid => {
+    const pid = peerToPlayerId[tid];
+    if (pid && players[pid]) {
+      players[pid].connected = false;
+      delete peerToPlayerId[tid];
+      broadcastToAll({ type: 'player_left', playerId: pid, players });
+      updateLobbyPlayers();
+      toast(`${players[pid].name} غادر اللعبة`);
+    }
+  });
+
+  return true;
+}
+
+// Single unified message handler
+function handleMessage(msg) {
+  const from = msg.from;
+
+  // Messages only the HOST processes
+  if (isHost) {
+    switch(msg.type) {
+      case 'join':
+        if (!from) break;
+        players[from] = { name: msg.name, score: 0, emoji: getEmoji(from), connected: true };
+        broadcastToAll({ type: 'player_list', players });
+        updateLobbyPlayers();
+        toast(`${msg.name} انضم إلى اللعبة! 🎉`);
+        break;
+
+      case 'submit':
+        if (!from) break;
+        gameState.answers[from] = msg.answers;
+        gameState.submitted[from] = true;
+        break;
+
+      case 'stop_with_answers':
+        if (!from) break;
+        gameState.answers[from] = msg.answers;
+        gameState.submitted[from] = true;
+        if (!gameState.stopped) {
+          gameState.stopped = true;
+          broadcastToAll({ type: 'round_stopping', stoppedBy: from });
+          setTimeout(() => hostEndRound(from), 2000);
+        }
+        break;
+    }
+  }
+
+  // Messages everyone processes (clients only — host already handles its own state directly)
+  if (!isHost) {
+    switch(msg.type) {
+      case 'welcome':
+        // Only process if meant for us (or broadcast)
+        players = msg.players;
+        mySettings = msg.settings || mySettings;
+        // Only go to lobby if we haven't already
+        if (gameState.phase === 'lobby') {
+          showLobbyScreen();
+        }
+        updateLobbyPlayers();
+        break;
+
+      case 'round_stopping':
+        if (!hasSubmitted) {
+          hasSubmitted = true;
+          collectMyAnswers();
+          disableInputs();
+          broadcastToAll({ type: 'submit', answers: myAnswers, from: myId });
+        }
+        showSubmittedOverlay();
+        break;
+
+      case 'settings_update':
+        mySettings = msg.settings;
+        document.getElementById('roundsDisplay').textContent = mySettings.rounds;
+        document.getElementById('timerDisplay').textContent = mySettings.timerSec;
+        break;
+    }
+  }
+
+  // Messages everyone processes
+  switch(msg.type) {
+    case 'player_list':
+      if (!isHost) { players = msg.players; updateLobbyPlayers(); }
+      break;
+
+    case 'player_left':
+      if (!isHost) { players = msg.players; updateLobbyPlayers(); toast('لاعب غادر اللعبة'); }
+      break;
+
+    case 'round_start':
+      startRoundUI(msg);
+      break;
+
+    case 'round_end':
+      showResults(msg);
+      break;
+
+    case 'game_over':
+      showGameOver(msg);
+      break;
+  }
+}
+
+function broadcastToAll(msg) {
+  if (trySend) {
+    try { trySend({ ...msg, from: myId }); } catch(e) { console.error('send error', e); }
+  }
+}
+
+// sendToHost is now just broadcastToAll (everyone is in the same room)
+function sendToHost(msg) {
+  broadcastToAll(msg);
+}
 
 // =============================================
 //  HOST: CREATE ROOM
@@ -1148,113 +1258,17 @@ function createRoom() {
   }
   document.getElementById('nameError').style.display = 'none';
 
-  if (!myPeerId) {
-    toast('لازال الاتصال جاري، انتظر لحظة...');
+  if (!trysteroJoinRoom) {
+    toast('لازال التحميل جاري، انتظر لحظة...');
     return;
   }
 
   isHost = true;
-  myRoomCode = myPeerId; // use PeerJS ID as room code
-  players[myPeerId] = { name: myName, score: 0, emoji: getEmoji(myPeerId), connected: true };
-  showLobbyScreen();
-}
+  const roomCode = generateRoomCode();
+  players[myId] = { name: myName, score: 0, emoji: getEmoji(myId), connected: true };
 
-function getEmoji(peerId) {
-  // Deterministic emoji from peer ID
-  const idx = peerId.charCodeAt(0) % PLAYER_EMOJIS.length;
-  return PLAYER_EMOJIS[idx];
-}
-
-function showLobbyScreen() {
-  showScreen('lobbyScreen');
-  const code = myPeerId; // PeerJS ID is the room code
-  document.getElementById('roomCodeDisplay').textContent = code;
-  const url = `${location.origin}${location.pathname.replace(/\/$/, '')}/?room=${code}`;
-  document.getElementById('shareUrl').textContent = url;
-  
-  if (isHost) {
-    document.getElementById('startGameBtn').style.display = 'block';
-    document.getElementById('settingsCard').style.display = 'block';
-  } else {
-    document.getElementById('startGameBtn').style.display = 'none';
-    document.getElementById('settingsCard').style.display = 'none';
-  }
-  
-  updateLobbyPlayers();
-}
-
-// =============================================
-//  HOST: HANDLE NEW CLIENT
-// =============================================
-function handleNewClientConnection(conn) {
-  conn.on('open', () => {
-    clientConnections[conn.peer] = conn;
-    // Send welcome with current state
-    conn.send({
-      type: 'welcome',
-      players,
-      settings: mySettings,
-      gamePhase: gameState.phase,
-    });
-    
-    conn.on('data', (msg) => handleClientMessage(conn.peer, msg));
-    
-    conn.on('close', () => {
-      if (players[conn.peer]) {
-        players[conn.peer].connected = false;
-      }
-      delete clientConnections[conn.peer];
-      broadcastToAll({ type: 'player_left', peerId: conn.peer, players });
-      updateLobbyPlayers();
-      toast(`${players[conn.peer]?.name || '?'} غادر اللعبة`);
-    });
-  });
-}
-
-function handleClientMessage(peerId, msg) {
-  switch (msg.type) {
-    case 'join':
-      players[peerId] = { name: msg.name, score: 0, emoji: getEmoji(peerId), connected: true };
-      broadcastToAll({ type: 'player_list', players });
-      updateLobbyPlayers();
-      toast(`${msg.name} انضم إلى اللعبة! 🎉`);
-      break;
-
-    case 'submit':
-      // Regular answer save (after round_stopping signal)
-      gameState.answers[peerId] = msg.answers;
-      gameState.submitted[peerId] = true;
-      break;
-
-    case 'stop_with_answers':
-      // First person to submit — save their answers and trigger graceful stop
-      gameState.answers[peerId] = msg.answers;
-      gameState.submitted[peerId] = true;
-      if (!gameState.stopped) {
-        gameState.stopped = true; // prevent double trigger
-        // Tell all clients to immediately save & send their answers
-        broadcastToAll({ type: 'round_stopping', stoppedBy: peerId });
-        // Wait 2s for clients to respond, then finalize
-        setTimeout(() => hostEndRound(peerId), 2000);
-      }
-      break;
-
-    case 'ready_next':
-      break;
-  }
-}
-
-function broadcastToAll(msg) {
-  Object.values(clientConnections).forEach(conn => {
-    if (conn.open) {
-      try { conn.send(msg); } catch(e) {}
-    }
-  });
-}
-
-function sendToHost(msg) {
-  if (hostConnection && hostConnection.open) {
-    hostConnection.send(msg);
+  if (openTrysteroRoom(roomCode)) {
+    showLobbyScreen();
   }
 }
 
@@ -1271,51 +1285,33 @@ function joinRoom() {
   }
   document.getElementById('nameError').style.display = 'none';
 
-  let roomCode = document.getElementById('roomCodeInput').value.trim();
+  const roomCode = document.getElementById('roomCodeInput').value.trim().toUpperCase();
   if (!roomCode) {
     showJoinError('أدخل كود الغرفة');
     return;
   }
 
+  if (!trysteroJoinRoom) {
+    showJoinError('لازال التحميل جاري، انتظر لحظة...');
+    return;
+  }
+
   hideJoinError();
   isHost = false;
+
   document.getElementById('joinRoomBtn').disabled = true;
   document.getElementById('joinRoomBtn').textContent = '⏳ جاري الاتصال...';
 
-  const conn = peer.connect(roomCode, { reliable: true });
-  hostConnection = conn;
-
-  const timeout = setTimeout(() => {
-    showJoinError('تعذر الاتصال بالغرفة. تأكد من الكود.');
-    document.getElementById('joinRoomBtn').disabled = false;
-    document.getElementById('joinRoomBtn').textContent = '🚀 انضمام';
-    conn.close();
-  }, 10000);
-
-  conn.on('open', () => {
-    clearTimeout(timeout);
-    conn.send({ type: 'join', name: myName });
-    document.getElementById('joinRoomBtn').disabled = false;
-    document.getElementById('joinRoomBtn').textContent = '🚀 انضمام';
-  });
-
-  conn.on('data', (msg) => {
-    handleHostMessage(msg);
-  });
-
-  conn.on('close', () => {
-    if (gameState.phase !== 'gameover') {
-      alert('انتهى الاتصال بالغرفة. ربما أغلق المضيف الغرفة.');
-      leaveGame();
-    }
-  });
-
-  conn.on('error', (err) => {
-    clearTimeout(timeout);
-    showJoinError('خطأ في الاتصال: ' + err.message);
-    document.getElementById('joinRoomBtn').disabled = false;
-    document.getElementById('joinRoomBtn').textContent = '🚀 انضمام';
-  });
+  if (openTrysteroRoom(roomCode)) {
+    // Announce ourselves — host will send welcome back
+    setTimeout(() => {
+      broadcastToAll({ type: 'join', name: myName });
+      document.getElementById('joinRoomBtn').disabled = false;
+      document.getElementById('joinRoomBtn').textContent = '🚀 انضمام';
+      // Show a waiting state while we get the welcome
+      setPeerStatus('connecting', '⏳ في انتظار المضيف...');
+    }, 1000);
+  }
 }
 
 function showJoinError(msg) {
@@ -1326,59 +1322,6 @@ function showJoinError(msg) {
 
 function hideJoinError() {
   document.getElementById('joinError').style.display = 'none';
-}
-
-// =============================================
-//  CLIENT: HANDLE HOST MESSAGES
-// =============================================
-function handleHostMessage(msg) {
-  switch (msg.type) {
-    case 'welcome':
-      players = msg.players;
-      mySettings = msg.settings || mySettings;
-      showLobbyScreen();
-      updateLobbyPlayers();
-      break;
-
-    case 'player_list':
-    case 'player_left':
-      players = msg.players;
-      updateLobbyPlayers();
-      if (msg.type === 'player_left') toast('لاعب غادر اللعبة');
-      break;
-
-    case 'round_start':
-      startRoundUI(msg);
-      break;
-
-    case 'player_submitted':
-      gameState.submitted = msg.submitted;
-      updateWaitingOverlay();
-      break;
-
-    case 'round_stopping':
-      // Host is ending the round — save whatever we have NOW and send it
-      if (!hasSubmitted) {
-        hasSubmitted = true;
-        collectMyAnswers();
-        disableInputs();
-        sendToHost({ type: 'submit', answers: myAnswers });
-      }
-      showSubmittedOverlay();
-      break;
-
-    case 'round_end':
-      showResults(msg);
-      break;
-
-    case 'game_over':
-      showGameOver(msg);
-      break;
-
-    case 'settings_update':
-      mySettings = msg.settings;
-      break;
-  }
 }
 
 // =============================================
@@ -1395,11 +1338,11 @@ function updateLobbyPlayers() {
 
   pArr.forEach(([pid, p]) => {
     const chip = document.createElement('div');
-    chip.className = 'player-chip' + (pid === myPeerId ? ' me' : '');
+    chip.className = 'player-chip' + (pid === myId ? ' me' : '');
     chip.innerHTML = `
       <span class="player-avatar">${p.emoji || '😎'}</span>
       <div class="player-name">${escHtml(p.name)}</div>
-      ${pid === myPeerId ? '<div class="player-score" style="color:var(--teal)">أنت</div>' : ''}
+      ${pid === myId ? '<div class="player-score" style="color:var(--teal)">أنت</div>' : ''}
     `;
     list.appendChild(chip);
   });
@@ -1603,14 +1546,14 @@ function submitAnswers() {
   showSubmittedOverlay();
 
   if (isHost) {
-    gameState.answers[myPeerId] = myAnswers;
-    gameState.submitted[myPeerId] = true;
+    gameState.answers[myId] = myAnswers;
+    gameState.submitted[myId] = true;
     if (!gameState.stopped) {
       gameState.stopped = true;
       // Tell all clients to immediately save & send their answers
-      broadcastToAll({ type: 'round_stopping', stoppedBy: myPeerId });
+      broadcastToAll({ type: 'round_stopping', stoppedBy: myId });
       // Wait 2s for clients to respond, then finalize
-      setTimeout(() => hostEndRound(myPeerId), 2000);
+      setTimeout(() => hostEndRound(myId), 2000);
     }
   } else {
     sendToHost({ type: 'stop_with_answers', answers: myAnswers });
@@ -1624,8 +1567,8 @@ function autoSubmit() {
   disableInputs();
 
   if (isHost) {
-    gameState.answers[myPeerId] = myAnswers;
-    gameState.submitted[myPeerId] = true;
+    gameState.answers[myId] = myAnswers;
+    gameState.submitted[myId] = true;
     checkAllSubmitted();
   } else {
     sendToHost({ type: 'submit', answers: myAnswers });
@@ -1672,7 +1615,7 @@ function updateWaitingOverlay() {
 // =============================================
 function callStop() {
   if (isHost) {
-    if (!gameState.stopped) hostEndRound(myPeerId);
+    if (!gameState.stopped) hostEndRound(myId);
   } else {
     sendToHost({ type: 'stop' });
   }
@@ -2039,17 +1982,15 @@ function hostPlayAgain() {
 //  UTILS
 // =============================================
 function leaveGame() {
-  if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
+  if (trysteroRoom) { try { trysteroRoom.leave(); } catch(e){} trysteroRoom = null; }
+  trySend = null;
+  peerToPlayerId = {};
   players = {};
   gameState = { phase: 'lobby', round: 0, letter: '', endTime: 0, answers: {}, submitted: {}, stopped: false, stoppedBy: null };
   isHost = false;
-  hostConnection = null;
-  clientConnections = {};
+  myRoomCode = '';
   clearInterval(timerInterval);
-  // Reinit peer
-  initPeer();
   showScreen('homeScreen');
-  // Clean URL
   history.replaceState({}, '', location.pathname);
 }
 
@@ -2085,9 +2026,7 @@ function escHtml(str) {
 // =============================================
 //  INIT
 // =============================================
-initPeer();
-
-// Check URL for room param
+// Check URL for room param (Trystero init is handled via async import above)
 const urlRoom = new URLSearchParams(location.search).get('room');
 if (urlRoom) {
   document.getElementById('roomCodeInput').value = urlRoom.toUpperCase();
