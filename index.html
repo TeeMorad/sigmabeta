@@ -786,7 +786,7 @@
 <div id="homeScreen" class="screen active">
   <div class="container">
     <div style="margin-top: 20px; margin-bottom: 8px; position: relative;">
-      <div style="position: absolute; top: 0; left: 0; background: rgba(245,200,66,0.12); border: 1px solid rgba(245,200,66,0.3); border-radius: 20px; padding: 3px 10px; font-size: 0.75rem; color: var(--gold); font-family: 'Tajawal', sans-serif;">v1.4</div>
+      <div style="position: absolute; top: 0; left: 0; background: rgba(245,200,66,0.12); border: 1px solid rgba(245,200,66,0.3); border-radius: 20px; padding: 3px 10px; font-size: 0.75rem; color: var(--gold); font-family: 'Tajawal', sans-serif;">v1.5</div>
       <div class="emoji-row">🧑 🐘 🏺</div>
       <div class="logo">انسان حيوان جماد</div>
       <div class="logo-sub">لعبة الكلمات الجماعية</div>
@@ -816,9 +816,9 @@
 
     <div class="card">
       <div class="card-title">🔗 انضمام لغرفة</div>
-      <input type="text" id="roomCodeInput" placeholder="أدخل كود الغرفة (6 أحرف)" maxlength="6"
-        autocomplete="off" style="direction:ltr; text-align:center; letter-spacing: 0.2em; font-size:1.3rem; text-transform:uppercase;"
-        oninput="this.value = this.value.toUpperCase()" />
+      <input type="text" id="roomCodeInput" placeholder="أدخل كود الغرفة"
+        autocomplete="off" style="direction:ltr; text-align:center; letter-spacing: 0.05em; font-size:1rem;"
+        />
       <div id="joinError" class="alert-box" style="display:none;"></div>
       <button class="btn btn-outline" onclick="joinRoom()" id="joinRoomBtn">
         🚀 انضمام
@@ -1053,27 +1053,41 @@ function showScreen(id) {
 //  PEER.JS SETUP
 // =============================================
 function initPeer(customId) {
-  const config = {
-    host: '0.peerjs.com',
-    port: 443,
-    secure: true,
+  // Use PeerJS default cloud server — most reliable option, no custom host needed
+  const peerConfig = {
     config: {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
       ]
     }
   };
-  if (customId) config.id = customId;
-  peer = new Peer(customId || undefined, config);
+
+  try {
+    peer = customId ? new Peer(customId, peerConfig) : new Peer(peerConfig);
+  } catch(e) {
+    setPeerStatus('error', '⚠️ خطأ — حاول تحديث الصفحة');
+    return;
+  }
+
+  // Timeout: if no 'open' after 8 seconds, retry once
+  const connectTimeout = setTimeout(() => {
+    if (!myPeerId) {
+      setPeerStatus('connecting', '🔄 إعادة المحاولة...');
+      try { peer.destroy(); } catch(e) {}
+      peer = null;
+      setTimeout(() => initPeer(customId), 1000);
+    }
+  }, 8000);
 
   peer.on('open', (id) => {
+    clearTimeout(connectTimeout);
     myPeerId = id;
     setPeerStatus('connected', '✅ جاهز للاتصال');
     document.getElementById('createRoomBtn').disabled = false;
     document.getElementById('joinRoomBtn').disabled = false;
-    // Auto-join from URL if room param present
     const urlRoom = new URLSearchParams(location.search).get('room');
     if (urlRoom && !isHost) {
       document.getElementById('roomCodeInput').value = urlRoom.toUpperCase();
@@ -1081,12 +1095,18 @@ function initPeer(customId) {
   });
 
   peer.on('error', (err) => {
-    console.error('PeerJS error:', err);
+    clearTimeout(connectTimeout);
+    console.error('PeerJS error:', err.type, err);
     if (err.type === 'unavailable-id') {
-      // ID taken, regenerate
-      initPeer();
+      initPeer(); // ID taken, try random one
     } else if (err.type === 'peer-unavailable') {
       showJoinError('الغرفة غير موجودة أو منتهية. تأكد من الكود.');
+    } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+      setPeerStatus('connecting', '🔄 إعادة الاتصال...');
+      try { peer.destroy(); } catch(e) {}
+      peer = null;
+      myPeerId = null;
+      setTimeout(() => initPeer(customId), 2000);
     } else {
       setPeerStatus('error', '⚠️ خطأ في الاتصال — حاول تحديث الصفحة');
     }
@@ -1113,6 +1133,8 @@ function generateRoomCode() {
   return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
+let myRoomCode = ''; // separate from PeerJS ID
+
 // =============================================
 //  HOST: CREATE ROOM
 // =============================================
@@ -1126,21 +1148,15 @@ function createRoom() {
   }
   document.getElementById('nameError').style.display = 'none';
 
+  if (!myPeerId) {
+    toast('لازال الاتصال جاري، انتظر لحظة...');
+    return;
+  }
+
   isHost = true;
-  const roomCode = generateRoomCode();
-  
-  // Re-init peer with specific room code ID
-  if (peer) peer.destroy();
-  initPeer(roomCode);
-  
-  // Wait for peer open, then proceed
-  const checkOpen = setInterval(() => {
-    if (myPeerId === roomCode) {
-      clearInterval(checkOpen);
-      players[myPeerId] = { name: myName, score: 0, emoji: getEmoji(myPeerId), connected: true };
-      showLobbyScreen();
-    }
-  }, 100);
+  myRoomCode = myPeerId; // use PeerJS ID as room code
+  players[myPeerId] = { name: myName, score: 0, emoji: getEmoji(myPeerId), connected: true };
+  showLobbyScreen();
 }
 
 function getEmoji(peerId) {
@@ -1151,7 +1167,7 @@ function getEmoji(peerId) {
 
 function showLobbyScreen() {
   showScreen('lobbyScreen');
-  const code = myPeerId;
+  const code = myPeerId; // PeerJS ID is the room code
   document.getElementById('roomCodeDisplay').textContent = code;
   const url = `${location.origin}${location.pathname.replace(/\/$/, '')}/?room=${code}`;
   document.getElementById('shareUrl').textContent = url;
@@ -1255,9 +1271,9 @@ function joinRoom() {
   }
   document.getElementById('nameError').style.display = 'none';
 
-  let roomCode = document.getElementById('roomCodeInput').value.trim().toUpperCase();
-  if (!roomCode || roomCode.length !== 6) {
-    showJoinError('أدخل كود الغرفة المكون من 6 أحرف');
+  let roomCode = document.getElementById('roomCodeInput').value.trim();
+  if (!roomCode) {
+    showJoinError('أدخل كود الغرفة');
     return;
   }
 
