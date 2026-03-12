@@ -28,7 +28,7 @@
       font-family: 'Tajawal', sans-serif;
       background: var(--deep);
       color: var(--text);
-      min-height: 100dvh;
+      min-height: 100vh;
       overflow-x: hidden;
       position: relative;
     }
@@ -71,7 +71,7 @@
     /* ===== LAYOUT ===== */
     .screen {
       display: none;
-      min-height: 100dvh;
+      min-height: 100vh;
       padding: 24px 16px 40px;
       position: relative;
       z-index: 1;
@@ -785,7 +785,8 @@
 <!-- ========== HOME SCREEN ========== -->
 <div id="homeScreen" class="screen active">
   <div class="container">
-    <div style="margin-top: 20px; margin-bottom: 8px;">
+    <div style="margin-top: 20px; margin-bottom: 8px; position: relative;">
+      <div style="position: absolute; top: 0; left: 0; background: rgba(245,200,66,0.12); border: 1px solid rgba(245,200,66,0.3); border-radius: 20px; padding: 3px 10px; font-size: 0.75rem; color: var(--gold); font-family: 'Tajawal', sans-serif;">v1.3</div>
       <div class="emoji-row">🧑 🐘 🏺</div>
       <div class="logo">انسان حيوان جماد</div>
       <div class="logo-sub">لعبة الكلمات الجماعية</div>
@@ -1152,7 +1153,7 @@ function showLobbyScreen() {
   showScreen('lobbyScreen');
   const code = myPeerId;
   document.getElementById('roomCodeDisplay').textContent = code;
-  const url = `${location.origin}/?room=${code}`;
+  const url = `${location.origin}${location.pathname.replace(/\/$/, '')}/?room=${code}`;
   document.getElementById('shareUrl').textContent = url;
   
   if (isHost) {
@@ -1750,40 +1751,29 @@ function validateAnswer(raw, requiredLetter) {
   // First letter check (normalize both sides)
   if (normalizeLetter(word[0]) !== normalizeLetter(requiredLetter)) return 'wrong_letter';
 
-  // No 3+ consecutive identical letters (e.g. "بببببب")
+  // Only Arabic letters and spaces allowed
+  if (!/^[\u0600-\u06FF\s]+$/.test(word)) return 'gibberish';
+
+  // Max word length
+  if (word.length > 15) return 'gibberish';
+
+  // 3+ consecutive identical letters (e.g. "بببببب")
   if (/(.)\1\1/.test(word)) return 'gibberish';
 
-  // All letters the same
+  // All same letter
   if (new Set(word).size === 1 && word.length > 1) return 'gibberish';
 
-  // Max word length — real Arabic words are rarely over 12 chars
-  if (word.length > 12) return 'gibberish';
-
-  // Arabic "connector" letters (letters that must connect to next) — a word with too many
-  // non-connecting letters in a row is suspicious
-  // More importantly: check vowel/consonant ratio
+  // 6+ consonants in a row with no soft letter at all — truly random
   const softLetters = new Set(['ا','و','ي','ى','أ','إ','آ','ة','ؤ','ئ','ء','ع','ه']);
-
-  // Count unique distinct letters — gibberish tends to have very high uniqueness ratio
-  const uniqueLetters = new Set(word).size;
-  const uniqueRatio = uniqueLetters / word.length;
-
-  // A word with more than 70% unique letters AND longer than 5 chars is likely gibberish
-  if (word.length > 5 && uniqueRatio > 0.75) return 'gibberish';
-
-  // Count soft/vowel-like letters
-  const softCount = [...word].filter(c => softLetters.has(c)).length;
-  const softRatio = softCount / word.length;
-
-  // If longer than 4 chars and virtually no soft letters → gibberish
-  if (word.length > 4 && softRatio < 0.1) return 'gibberish';
-
-  // Check consonant clusters: 4+ hard consonants in a row (no soft letter break)
   let run = 0;
   for (const ch of word) {
     run = softLetters.has(ch) ? 0 : run + 1;
-    if (run >= 4) return 'gibberish';
+    if (run >= 6) return 'gibberish';
   }
+
+  // Very long word with zero soft letters at all
+  const softCount = [...word].filter(c => softLetters.has(c)).length;
+  if (word.length > 6 && softCount === 0) return 'gibberish';
 
   return 'valid';
 }
